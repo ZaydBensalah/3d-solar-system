@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Interactive 3D Solar System (Speed Control)</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    #gui { position: absolute; top: 0; right: 0; z-index: 100; }
+    #resetBtn { position: absolute; top: 10px; left: 10px; z-index: 101; padding: 8px 12px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <button id="resetBtn">Reset Simulation</button>
+  <div id="gui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dat.gui@0.7.9/build/dat.gui.min.js"></script>
+  <script>
+    // Constants and performance tuning
+    const G = 1;
+    const baseDt = 0.2;
+    const scatterCount = 30, scatterSpeed = 1, scatterLifetime = 30;
+    const beltCount = 2000;
+    const accretionCheckPerFrame = 100;
+    const params = { speedFactor: 100 };
+
+```
+// Scene setup
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
+camera.position.set(0, 800, 1600);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Controls
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.enablePan = true;
+controls.minDistance = 100;
+controls.maxDistance = 90000;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x444444));
+const sunLight = new THREE.PointLight(0xffffff, 4);
+scene.add(sunLight);
+
+// Storage
+const bodies = [];
+const scatterParticles = [];
+
+// Body class
+class Body {
+  constructor(name, mass, dist, size, color) {
+    this.name = name;
+    this.mass = mass;
+    this.dist = dist;
+    this.size = size;
+    this.geometry = new THREE.SphereGeometry(size, 16, 16);
+    this.material = new THREE.MeshStandardMaterial({ color, emissive: name === 'Sun' ? color : 0, emissiveIntensity: name === 'Sun' ? 5 : 0 });
+    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh.userData.body = this;
+    scene.add(this.mesh);
+    this.reset();
+  }
+  reset() {
+    this.pos = new THREE.Vector3(this.dist, 0, 0);
+    this.vel = this.dist ? new THREE.Vector3(0, 0, Math.sqrt(G * bodies[0].mass / this.dist)) : new THREE.Vector3();
+    this.mesh.position.copy(this.pos);
+  }
+  updateForce() {
+    let fx = 0, fy = 0, fz = 0;
+    for (let o of bodies) {
+      if (o === this) continue;
+      const rx = o.pos.x - this.pos.x;
+      const ry = o.pos.y - this.pos.y;
+      const rz = o.pos.z - this.pos.z;
+      const d2 = rx * rx + ry * ry + rz * rz;
+      const minDist = this.size + o.size;
+      if (d2 < minDist * minDist) continue;
+      const invd = 1 / Math.sqrt(d2);
+      const f = G * this.mass * o.mass * invd * invd * invd;
+      fx += rx * f;
+      fy += ry * f;
+      fz += rz * f;
+    }
+    this.force = { x: fx, y: fy, z: fz };
+  }
+  step(dt) {
+    this.vel.x += (this.force.x / this.mass) * dt;
+    this.vel.y += (this.force.y / this.mass) * dt;
+    this.vel.z += (this.force.z / this.mass) * dt;
+    this.pos.x += this.vel.x * dt;
+    this.pos.y += this.vel.y * dt;
+    this.pos.z += this.vel.z * dt;
+    this.mesh.position.copy(this.pos);
+  }
+}
+
+// Create bodies
+bodies.push(new Body('Sun', 100000, 0, 200, 0xffff33));
+const pdata = [
+  ['Mercury', 2, 1000, 4, 0x888888],
+  ['Venus', 5, 1800, 7, 0xffcc66],
+  ['Earth', 10, 2800, 8, 0x3366ff],
+  ['Mars', 8, 3800, 6, 0xff6666],
+  ['Jupiter', 200, 5000, 20, 0xff8800],
+  ['Saturn', 180, 6800, 18, 0xffddaa],
+  ['Uranus', 50, 8800, 14, 0x66ccff],
+  ['Neptune', 55, 11000, 14, 0x3333ff],
+  ['Pluto', 1, 13500, 3, 0xaaaaaa]
+];
+pdata.forEach(d => bodies.push(new Body(...d)));
+
+// Asteroid belt
+const beltMin = bodies.find(b => b.name === 'Mars').dist + 500;
+const beltMax = bodies.find(b => b.name === 'Jupiter').dist - 500;
+const beltPos = new Float32Array(beltCount * 3);
+const beltSpeed = new Float32Array(beltCount);
+for (let i = 0; i < beltCount; i++) {
+  const r = beltMin + Math.random() * (beltMax - beltMin);
+  const ang = Math.random() * Math.PI * 2;
+  beltPos[3 * i] = Math.cos(ang) * r;
+  beltPos[3 * i + 1] = 0;
+  beltPos[3 * i + 2] = Math.sin(ang) * r;
+  beltSpeed[i] = Math.sqrt(G * bodies[0].mass / r);
+}
+const beltGeo = new THREE.BufferGeometry();
+beltGeo.setAttribute('position', new THREE.BufferAttribute(beltPos, 3));
+const beltMat = new THREE.PointsMaterial({ color: 0x888888, size: 0.2 });
+const belt = new THREE.Points(beltGeo, beltMat);
+scene.add(belt);
+
+// GUI
+const gui = new dat.GUI({ width: 300, autoPlace: false });
+document.getElementById('gui').appendChild(gui.domElement);
+gui.add(params, 'speedFactor', 0.1, 100, 1).name('Animation Speed');
+
+// Selection logic
+const sel = { selected: 'Sun' };
+let selectedBody = bodies[0];
+gui.add(sel, 'selected', bodies.map(b => b.name)).name('Select Body').onChange(name => {
+  const b = bodies. find(x => x.name === name);
+  if (b) selectedBody = b;
+  prevSelectedPos.copy(selectedBody.pos);
+});
+let selFolder;
+function updateGUI() {
+  if (selFolder) gui.removeFolder(selFolder);
+  const b = bodies.find(x => x.name === sel.selected);
+  selFolder = gui.addFolder(b.name + ' Props');
+  selFolder.add(b, 'dist', 500, 20000, 1).onChange(() => b.reset());
+  selFolder.add(b, 'mass', 1, 200000, 1);
+  if (b.name === 'Sun') selFolder.add(b.material, 'emissiveIntensity', 0, 20, 0.1).name('Sun Glow');
+  selFolder.open();
+}
+updateGUI();
+
+// Initialize prevSelectedPos
+let prevSelectedPos = selectedBody.pos.clone();
+
+// Reset button
+document.getElementById('resetBtn').onclick = () => bodies.forEach(b => b.reset());
+
+// Animation loop remains the same as original implementation
+function animate() {
+  // Track camera with selected body (original behavior)
+  const delta = new THREE.Vector3().subVectors(selectedBody.pos, prevSelectedPos);
+  camera.position.add(delta);
+  prevSelectedPos.copy(selectedBody.pos);
+  controls.target.copy(selectedBody.pos);
+
+  requestAnimationFrame(animate);
+  sunLight.position.copy(bodies[0].pos);
+  sunLight.intensity = bodies[0].material.emissiveIntensity;
+  const dtAdj = baseDt * params.speedFactor;
+  bodies.forEach(b => b.updateForce());
+  bodies.forEach(b => b.step(dtAdj));
+
+  // Update asteroid belt
+  const posArr = belt.geometry.attributes.position.array;
+  for (let i = 0; i < beltCount; i++) {
+    const idx3 = 3 * i;
+    let x = posArr[idx3] - bodies[0].pos.x;
+    let z = posArr[idx3 + 2] - bodies[0].pos.z;
+    const r = Math.hypot(x, z);
+    const ang = Math.atan2(z, x) + (beltSpeed[i] * dtAdj) / r;
+    posArr[idx3] = Math.cos(ang) * r + bodies[0].pos.x;
+    posArr[idx3 + 2] = Math.sin(ang) * r + bodies[0].pos.z;
+  }
+  belt.geometry.attributes.position.needsUpdate = true;
+
+  // Accretion & scatter updates unchanged
+  for (let k = 0; k < accretionCheckPerFrame; k++) {
+    const i = Math.floor(Math.random() * beltCount);
+    const j = Math.floor(Math.random() * beltCount);
+    if (i === j) continue;
+    const ix = 3 * i, jx = 3 * j;
+    const dx = posArr[ix] - posArr[jx];
+    const dz = posArr[ix + 2] - posArr[jx + 2];
+    if (dx * dx + dz * dz < 0.2 * 0.2) {
+      const r = Math.hypot(
+        (posArr[ix] + posArr[jx]) / 2 - bodies[0].pos.x,
+        (posArr[ix + 2] + posArr[jx + 2]) / 2 - bodies[0].pos.z
+      );
+      bodies.push(new Body('Asteroid', 0.02, r, 0.3, 0xcccccc));
+    }
+  }
+
+  for (let idx = scatterParticles.length - 1; idx >= 0; idx--) {
+    const p = scatterParticles[idx];
+    p.position.add(p.userData.velocity);
+    p.userData.life--;
+    const s = p.userData.life / scatterLifetime;
+    p.scale.set(s, s, s);
+    if (p.userData.life <= 0) {
+      scene.remove(p);
+      scatterParticles.splice(idx, 1);
+    }
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// Resize handling
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+```
+
+  </script>
+</body>
+</html>
